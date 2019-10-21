@@ -13,6 +13,7 @@ import argparse
 import contextlib
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,10 @@ TARGETS = [
     'simple_decompress',
     'stream_decompress',
     'block_decompress',
+    'dictionary_round_trip',
+    'dictionary_decompress',
+    'zstd_frame_info',
+    'simple_compress',
 ]
 ALL_TARGETS = TARGETS + ['all']
 FUZZ_RNG_SEED_SIZE = 4
@@ -191,11 +196,21 @@ def build_parser(args):
         default=LIB_FUZZING_ENGINE,
         help=('The fuzzing engine to use e.g. /path/to/libFuzzer.a '
               "(default: $LIB_FUZZING_ENGINE='{})".format(LIB_FUZZING_ENGINE)))
-    parser.add_argument(
+
+    fuzz_group = parser.add_mutually_exclusive_group()
+    fuzz_group.add_argument(
         '--enable-coverage',
         dest='coverage',
         action='store_true',
         help='Enable coverage instrumentation (-fsanitize-coverage)')
+    fuzz_group.add_argument(
+        '--enable-fuzzer',
+        dest='fuzzer',
+        action='store_true',
+        help=('Enable clang fuzzer (-fsanitize=fuzzer). When enabled '
+              'LIB_FUZZING_ENGINE is ignored')
+    )
+
     parser.add_argument(
         '--enable-asan', dest='asan', action='store_true', help='Enable UBSAN')
     parser.add_argument(
@@ -326,13 +341,13 @@ def build_parser(args):
     args = parse_env_flags(args, ' '.join(
         [args.cppflags, args.cflags, args.cxxflags, args.ldflags]))
 
-    # Check option sanitiy
+    # Check option sanity
     if args.msan and (args.asan or args.ubsan):
         raise RuntimeError('MSAN may not be used with any other sanitizers')
     if args.msan_track_origins and not args.msan:
         raise RuntimeError('--enable-msan-track-origins requires MSAN')
     if args.ubsan_pointer_overflow and not args.ubsan:
-        raise RuntimeError('--enable-ubsan-pointer-overlow requires UBSAN')
+        raise RuntimeError('--enable-ubsan-pointer-overflow requires UBSAN')
     if args.sanitize_recover and not args.sanitize:
         raise RuntimeError('--enable-sanitize-recover but no sanitizers used')
 
@@ -349,11 +364,11 @@ def build(args):
     targets = args.TARGET
     cc = args.cc
     cxx = args.cxx
-    cppflags = [args.cppflags]
-    cflags = [args.cflags]
-    ldflags = [args.ldflags]
-    cxxflags = [args.cxxflags]
-    mflags = [args.mflags] if args.mflags else []
+    cppflags = shlex.split(args.cppflags)
+    cflags = shlex.split(args.cflags)
+    ldflags = shlex.split(args.ldflags)
+    cxxflags = shlex.split(args.cxxflags)
+    mflags = shlex.split(args.mflags)
     # Flags to be added to both cflags and cxxflags
     common_flags = []
 
@@ -363,13 +378,17 @@ def build(args):
         '-DFUZZ_RNG_SEED_SIZE={}'.format(args.fuzz_rng_seed_size),
     ]
 
-    mflags += ['LIB_FUZZING_ENGINE={}'.format(args.lib_fuzzing_engine)]
-
     # Set flags for options
+    assert not (args.fuzzer and args.coverage)
     if args.coverage:
         common_flags += [
             '-fsanitize-coverage=trace-pc-guard,indirect-calls,trace-cmp'
         ]
+    if args.fuzzer:
+        common_flags += ['-fsanitize=fuzzer']
+        args.lib_fuzzing_engine = ''
+
+    mflags += ['LIB_FUZZING_ENGINE={}'.format(args.lib_fuzzing_engine)]
 
     if args.sanitize_recover:
         recover_flags = ['-fsanitize-recover=all']
@@ -606,7 +625,7 @@ def regression(args):
 
 def gen_parser(args):
     description = """
-    Generate a seed corpus appropiate for TARGET with data generated with
+    Generate a seed corpus appropriate for TARGET with data generated with
     decodecorpus.
     The fuzz inputs are prepended with a seed before the zstd data, so the
     output of decodecorpus shouldn't be used directly.
